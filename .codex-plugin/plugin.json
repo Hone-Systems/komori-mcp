@@ -1,0 +1,11 @@
+{
+  "name": "komori",
+  "displayName": "Komori",
+  "version": "0.1.0",
+  "description": "Japan-equities disclosure research — filings, 変遷 narrative threads, scenario trees, and semantic search over what a company actually wrote.",
+  "author": { "name": "Komori", "url": "https://komori.app" },
+  "homepage": "https://komori.app",
+  "repository": "https://github.com/Hone-Systems/komori-mcp",
+  "license": "MIT",
+  "keywords": ["japan", "equities", "disclosures", "edinet", "research", "finance"]
+}

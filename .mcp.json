@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "komori": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/Hone-Systems/komori-mcp#subdirectory=server",
+        "komori-mcp"
+      ],
+      "env": {
+        "KOMORI_MCP_TRANSPORT": "stdio"
+      }
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "komori-mcp",
+  "owner": { "name": "Komori", "url": "https://komori.app" },
+  "plugins": [
+    {
+      "name": "komori",
+      "source": "./",
+      "description": "Japan-equities disclosure research over MCP — filings, 変遷 narrative threads, scenario trees, semantic filing search."
+    }
+  ]
+}
