@@ -33,8 +33,72 @@ _TOKEN_FILE = _CONFIG_DIR / "mcp_token.json"
 _KEYRING_SERVICE = "komori-mcp"
 _KEYRING_USER = "api_token"
 
-_SUCCESS_HTML = """<!doctype html><html><body style="font-family:sans-serif;text-align:center;padding-top:4rem">
-<h2>Connected to Komori.</h2><p>You can close this window.</p></body></html>"""
+# This local page, not `/mcp-authorize` on komori.app, is the LAST thing the user actually sees —
+# the retail page redirects here the moment it has a token, so this is the frame that stays on
+# screen. It needs the same visual care as the retail flow it's the tail end of, not a bare
+# placeholder — reuses the same ring-draw success mark, accent, and type as the Komori retail UI
+# (docs/retail-DESIGN.md: light-only, Zen Kaku Gothic New, blue accent, no card nesting) so the
+# whole login reads as one continuous, deliberate moment rather than ending on a different product.
+_SUCCESS_HTML = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Komori</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --color-surface: #faf8f3;
+    --color-text: #1a1815;
+    --color-text-muted: #6f6862;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--color-surface); color: var(--color-text);
+    font-family: "Zen Kaku Gothic New", -apple-system, sans-serif;
+  }
+  .card {
+    display: flex; flex-direction: column; align-items: center; gap: 18px;
+    padding: 0 24px; text-align: center;
+    animation: rise 0.5s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  }
+  h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
+  p { font-size: 15px; color: var(--color-text-muted); margin: 0; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes ring { to { stroke-dashoffset: 0; } }
+  @keyframes check { to { stroke-dashoffset: 0; } }
+  .ring { animation: ring 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) 0.1s forwards; }
+  .check { animation: check 0.45s ease 0.75s forwards; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <svg width="72" height="72" viewBox="0 0 84 84" aria-hidden="true">
+      <circle cx="42" cy="42" r="38" fill="#EAF3EE"/>
+      <circle cx="42" cy="42" r="38" fill="none" stroke="#2C7A5B" stroke-width="3.5"
+              stroke-linecap="round" stroke-dasharray="239" stroke-dashoffset="239" class="ring"/>
+      <path d="M27 43 l10 10 l20 -23" fill="none" stroke="#2C7A5B" stroke-width="5"
+            stroke-linecap="round" stroke-linejoin="round"
+            stroke-dasharray="52" stroke-dashoffset="52" class="check"/>
+    </svg>
+    <h1>Komoriに接続しました</h1>
+    <p>このウィンドウは閉じて構いません。</p>
+  </div>
+</body>
+</html>"""
+
+_INVALID_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>Komori</title>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:#faf8f3; color:#6f6862; font-family:"Zen Kaku Gothic New",-apple-system,sans-serif; }
+  p { font-size:15px; }
+</style></head>
+<body><p>この接続先は無効です。</p></body></html>"""
 
 
 def _try_import_keyring():
@@ -103,7 +167,9 @@ def _run_login_flow_sync(app_base: str) -> str:
                 self.wfile.write(_SUCCESS_HTML.encode())
             else:
                 self.send_response(400)
+                self.send_header("Content-Type", "text/html")
                 self.end_headers()
+                self.wfile.write(_INVALID_HTML.encode())
 
         def log_message(self, *_args):
             return  # silence — this is a one-shot local listener, not a service
