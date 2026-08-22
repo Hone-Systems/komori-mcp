@@ -47,10 +47,21 @@ class KomoriClient:
     async def request(self, method: str, path: str, params: dict | None = None, json: dict | None = None) -> KomoriResult:
         token = await self._token_provider() if self._token_provider else None
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.request(
-                method, f"{self.base_url}{path}", params=params, json=json, headers=headers
-            )
+        try:
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.request(
+                    method, f"{self.base_url}{path}", params=params, json=json, headers=headers
+                )
+        except httpx.RequestError as exc:
+            # DNS failure, connection refused, TLS error, read timeout — none of these are the
+            # API answering with an error, they're the API not being reachable at all. Routed
+            # through the same KomoriApiError shape (status 0, no real HTTP status) so `_call`'s
+            # single error-handling chokepoint covers this without a second except clause, and a
+            # network blip never masquerades as a 401 that would wrongly trigger a re-login.
+            raise KomoriApiError(
+                0, f"Could not reach the Komori API ({exc.__class__.__name__}). Check your network and try again."
+            ) from exc
+
         if resp.status_code >= 400:
             try:
                 detail = resp.json().get("detail", resp.text)
@@ -58,14 +69,26 @@ class KomoriClient:
                 detail = resp.text
             raise KomoriApiError(resp.status_code, str(detail))
 
-        body = resp.json()
-        charged = resp.headers.get("X-Komori-Units-Charged")
-        remaining = resp.headers.get("X-Komori-Units-Remaining")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise KomoriApiError(resp.status_code, "The API returned a response that wasn't valid JSON.") from exc
+
+        # A malformed unit header is a metering-display problem, not a reason to fail an
+        # otherwise-successful read — the caller still gets its data, just without a units figure.
+        charged_raw = resp.headers.get("X-Komori-Units-Charged")
+        remaining_raw = resp.headers.get("X-Komori-Units-Remaining")
+        try:
+            units_charged = int(charged_raw) if charged_raw is not None else None
+            units_remaining = int(remaining_raw) if remaining_raw is not None else None
+        except ValueError:
+            units_charged = units_remaining = None
+
         return KomoriResult(
             data=body.get("data"),
             notice=body.get("notice"),
-            units_charged=int(charged) if charged is not None else None,
-            units_remaining=int(remaining) if remaining is not None else None,
+            units_charged=units_charged,
+            units_remaining=units_remaining,
         )
 
     async def get(self, path: str, params: dict | None = None) -> KomoriResult:

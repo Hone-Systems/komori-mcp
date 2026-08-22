@@ -19,6 +19,7 @@ import json
 import os
 import secrets
 import stat
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -116,8 +117,18 @@ def _run_login_flow_sync(app_base: str) -> str:
     authorize_url = f"{app_base}/mcp-authorize?callback={callback}&state={state}"
     webbrowser.open(authorize_url)
 
-    server.timeout = LOGIN_TIMEOUT_S
-    server.handle_request()  # blocks for exactly one request, or times out
+    # Looped rather than a single `handle_request()`: one stray request on the ephemeral port
+    # (a browser prefetch, an unrelated local probe) before the real callback would otherwise
+    # consume the listener's one shot and strand the actual login until the timeout.
+    # `Handler.do_GET` only ever sets `result["token"]` on a state match, so an invalid request
+    # gets its 400 and the loop keeps waiting for the real one.
+    deadline = time.monotonic() + LOGIN_TIMEOUT_S
+    while "token" not in result:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        server.timeout = remaining
+        server.handle_request()
     server.server_close()
 
     if "token" not in result:
@@ -137,11 +148,39 @@ async def login(app_base: str | None = None) -> str:
     return token
 
 
+# FastMCP can dispatch several tool calls concurrently. Without single-flighting, every one of
+# them would see "no stored token" on the very first calls of a session and independently open
+# its own browser window and mint its own personal API token — several durable credentials for
+# one login. `_login_lock` serialises the check-and-launch decision; `_login_task` is the one
+# in-flight login every concurrent caller then awaits together, so exactly one browser opens and
+# one token is minted no matter how many tool calls arrive at once.
+_login_lock = asyncio.Lock()
+_login_task: "asyncio.Task[str] | None" = None
+
+
 async def get_token(app_base: str | None = None) -> str:
     """The token provider `KomoriClient` calls before every request. A stored token is reused;
     with none stored, this triggers the browser-login flow automatically — the whole point being
     that the first tool call just works, with no separate `komori-mcp login` step to remember."""
+    global _login_task
+
     token = _load_stored_token()
     if token:
         return token
-    return await login(app_base)
+
+    async with _login_lock:
+        # Re-check inside the lock: a waiter that queued behind another caller's login may find
+        # it already finished and stored a token by the time it gets in.
+        token = _load_stored_token()
+        if token:
+            return token
+        if _login_task is None or _login_task.done():
+            _login_task = asyncio.create_task(login(app_base))
+        task = _login_task
+
+    try:
+        return await task
+    finally:
+        async with _login_lock:
+            if _login_task is task:
+                _login_task = None
