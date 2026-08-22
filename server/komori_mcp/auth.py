@@ -179,8 +179,17 @@ async def get_token(app_base: str | None = None) -> str:
         task = _login_task
 
     try:
-        return await task
+        # `asyncio.shield`, not a bare `await task`: without it, cancelling ONE caller (e.g. the
+        # MCP client cancelling a single tool call) propagates into the shared task itself and
+        # cancels every other waiter's login along with it — a caller's cancellation must not be
+        # able to take down a login two other callers are legitimately waiting on.
+        return await asyncio.shield(task)
     finally:
         async with _login_lock:
-            if _login_task is task:
+            # Only clear once the task has actually finished. A caller whose await was cut short
+            # by shielded cancellation reaches this `finally` before the still-running task does
+            # — clearing unconditionally here would let a new caller start a SECOND login while
+            # the first is still in flight, which is the exact bug this whole mechanism exists to
+            # prevent, just reachable through early cancellation instead of the initial race.
+            if _login_task is task and task.done():
                 _login_task = None
