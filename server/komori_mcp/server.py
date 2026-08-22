@@ -38,17 +38,22 @@ _client = KomoriClient(token_provider=get_token)
 async def _call(fn, *args, **kwargs) -> dict[str, Any]:
     """Runs one API call, retrying exactly once through a fresh browser-login if the stored
     token was revoked or expired. Every result is shaped the same way so the model always finds
-    `notice` and unit cost in the same place, and every failure surfaces the API's own message
-    (docs/TOOL-DESIGN.md §6) rather than a generic wrapper error."""
-    try:
-        result = await fn(*args, **kwargs)
-    except KomoriApiError as exc:
-        if exc.status_code == 401:
-            clear_stored_token()
-            result = await fn(*args, **kwargs)  # one retry, through a fresh login
-        else:
+    `notice` and unit cost in the same place, and every failure — including one on the retry
+    itself, or the login flow timing out — surfaces a clear, actionable message
+    (docs/TOOL-DESIGN.md §6) rather than an uncaught exception escaping to the MCP transport."""
+    retried = False
+    while True:
+        try:
+            result = await fn(*args, **kwargs)
+            return _shape(result)
+        except KomoriApiError as exc:
+            if exc.status_code == 401 and not retried:
+                retried = True
+                clear_stored_token()
+                continue  # one retry, through a fresh login
             return {"is_error": True, "status_code": exc.status_code, "error": exc.detail}
-    return _shape(result)
+        except TimeoutError as exc:
+            return {"is_error": True, "error": str(exc)}
 
 
 def _shape(result: KomoriResult) -> dict[str, Any]:
