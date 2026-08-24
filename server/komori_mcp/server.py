@@ -220,6 +220,7 @@ async def get_company_threads(
     kind: str | None = None,
     latest_move: str | None = None,
     since: str | None = None,
+    themes: bool = False,
 ) -> dict:
     """The company's 変遷 threads — narrative topics tracked across its filing/disclosure history
     (a margin-recovery thread, a risk that's been building, a target that's quietly lost its
@@ -227,6 +228,14 @@ async def get_company_threads(
     filter it — narrowing with `move`/`kind`/`latest_move`/`since` costs exactly the same as
     fetching everything, so always narrow when you can; there's no reason to fetch all 100+
     threads to find the four you actually want.
+
+    Pass `themes=True` instead to get the cross-company THEMES this company sits in — the same
+    management subject resolved across many filers, with how THIS company relates to it and in
+    which direction (e.g. the leaked-customer-data theme and whether this company files it as a
+    headwind). Costs the same 1 unit for the company, free if it is on your watchlist. The
+    thread filters/`ids` do not apply in themes mode — passing any of them with `themes=True` is
+    an error, not a silent no-op. An empty list means the company is in no themes (or is not
+    covered by the grouping lane yet) — not a confirmed negative.
 
     `move` matches ANY event in a thread's history; `latest_move` matches only the most recent
     one — different questions (comma-separated or repeated, both accepted). Valid moves include
@@ -239,6 +248,16 @@ async def get_company_threads(
     Pass `ids` (comma-separated thread ids) instead of a filter to fetch specific threads in full
     (1 unit each) — `ids` and the filters can't be combined in one call.
     """
+    if themes:
+        if any(v is not None for v in (ids, move, kind, latest_move, since)):
+            # The same error shape `_call` returns, so the model sees one contract.
+            return {
+                "is_error": True,
+                "error": "themes=True のときはスレッドの絞り込み（ids / move / kind / "
+                "latest_move / since）は指定できません。テーマを取得する場合は ticker だけを"
+                "指定してください。",
+            }
+        return await _call(_client.get, f"/companies/{ticker}/themes")
     params: dict[str, Any] = {}
     for key, val in (("ids", ids), ("move", move), ("kind", kind), ("latest_move", latest_move), ("since", since)):
         if val is not None:
@@ -251,6 +270,67 @@ async def get_thread(ticker: str, thread_id: str) -> dict:
     """One thread's full quote history — every event, dated, with the company's verbatim words
     and a plain-language note on what changed. Costs 1 unit under the usual free-forever rule."""
     return await _call(_client.get, f"/companies/{ticker}/threads/{thread_id}")
+
+
+# --- Cross-company themes (#634) ---------------------------------------------------------------
+
+
+@mcp.tool()
+async def list_themes(
+    min_reach: int = 10,
+    episodic: bool | None = None,
+    section: str | None = None,
+    q: str | None = None,
+    limit: int = 50,
+    skip: int = 0,
+) -> dict:
+    """The cross-company themes index — one management subject resolved across many companies
+    ("leaked customer data" as ONE theme spanning 173 filers, with the direction each filed it
+    in). Free. Themes are ranked by how many companies are in each; drill into one with
+    `get_theme(theme_id)`.
+
+    `min_reach` is the minimum number of companies a theme must span; the default floor of 10
+    keeps one- and two-company groups off the list (they are not themes yet) — lower it to widen.
+
+    `section` narrows to one index partition: `contested` (at least 3 companies filing it as
+    helping AND at least 3 as hurting), `housekeeping`, `episodic` (tied to a dated event), or
+    `broad`.
+
+    `q` searches theme names and descriptions, within the reach floor already applied. A
+    zero-hit `q` means no theme matches the term — not an error.
+    """
+    params: dict[str, Any] = {"min_reach": min_reach, "limit": limit, "skip": skip}
+    for key, val in (("episodic", episodic), ("section", section), ("q", q)):
+        if val is not None:
+            params[key] = val
+    return await _call(_client.get, "/themes", params=params)
+
+
+@mcp.tool()
+async def get_theme(
+    theme_id: str,
+    limit: int = 50,
+    skip: int = 0,
+    relation: str | None = None,
+    polarity: str | None = None,
+    sector: str | None = None,
+) -> dict:
+    """One theme in full: the theme itself, the member companies (paginated), the per-sector /
+    per-channel / per-year breakdowns, and neighbouring themes. Costs 1 unit per theme — free
+    forever after the first read, and a 180-member theme costs the same as a 3-member one (the
+    member list is one object, paged, not many objects). No watchlist exemption: a theme spans
+    many companies, so there is no single ticker to exempt.
+
+    `theme_id` is the opaque id from `list_themes`.
+
+    `relation`, `polarity` and `sector` narrow the MEMBER list only, never the theme; a filtered
+    page reports what the filter matched. `polarity` values: POSITIVE / NEGATIVE / NEUTRAL.
+    """
+    params: dict[str, Any] = {"limit": limit, "skip": skip}
+    for key, val in (("relation", relation), ("polarity", polarity), ("sector", sector)):
+        if val is not None:
+            params[key] = val
+    return await _call(_client.get, f"/themes/{theme_id}", params=params)
 
 
 # --- News / signals ---------------------------------------------------------------------------
