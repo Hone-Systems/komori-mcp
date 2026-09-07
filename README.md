@@ -5,7 +5,7 @@ threads tracked across a company's filing history), scenario trees, and semantic
 a company actually wrote, not just its headlines. Built on the [Komori external API](https://api.komori.app/v1)
 (`GET /v1/openapi.json` for the full contract).
 
-Requires a [Komori Basic](https://komori.app/plans) subscription. No pasted tokens: connecting
+Requires a [Komori Plus](https://komori.app/plans) subscription. No pasted tokens: connecting
 opens a real login in your browser, and a personal API token is minted and handed back
 automatically — the same pattern `gh auth login --web` uses.
 
