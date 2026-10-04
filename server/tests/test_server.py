@@ -97,3 +97,49 @@ async def test_company_threads_default_mode_is_unchanged(monkeypatch):
         "/companies/7203/threads",
         {"move": "SOFTENED", "since": "FY2023"},
     )]
+
+
+# --- senki#1022: filing briefings ----------------------------------------------------------------
+
+
+async def test_list_filing_briefings_defaults_to_the_site_window(monkeypatch):
+    fake = _fake(monkeypatch)
+    await server.list_filing_briefings()
+    assert fake.calls == [("/filing-briefings", {"limit": 30})], \
+        "no dates sent means the API applies its own today+14d window"
+
+
+async def test_list_filing_briefings_forwards_every_filter(monkeypatch):
+    fake = _fake(monkeypatch)
+    await server.list_filing_briefings(
+        ticker="7203", date_from="2026-10-01", date_to="2026-10-31", limit=10, cursor="c1",
+    )
+    assert fake.calls == [(
+        "/filing-briefings",
+        {"limit": 10, "ticker": "7203", "date_from": "2026-10-01", "date_to": "2026-10-31", "cursor": "c1"},
+    )]
+
+
+async def test_list_filing_briefings_refuses_bad_ranges_before_calling(monkeypatch):
+    fake = _fake(monkeypatch)
+    cases = {
+        ("2026/10/01", None): "YYYY-MM-DD",
+        ("2026-02-30", None): "実在する日付",
+        ("2026-10-31", "2026-10-01"): "より前",
+        ("2026-01-01", "2026-12-31"): "92",
+    }
+    for (date_from, date_to), needle in cases.items():
+        result = await server.list_filing_briefings(date_from=date_from, date_to=date_to)
+        assert result["is_error"] is True, (date_from, date_to)
+        assert needle in result["error"], result["error"]
+    assert fake.calls == [], "a rejected range must not reach the API"
+
+
+async def test_get_filing_briefing_addresses_one_period_or_current(monkeypatch):
+    fake = _fake(monkeypatch)
+    await server.get_filing_briefing("7203", "FY2027-Q1")
+    await server.get_filing_briefing("7203")
+    assert fake.calls == [
+        ("/companies/7203/filing-briefings/FY2027-Q1", None),
+        ("/companies/7203/filing-briefings/current", None),
+    ]
