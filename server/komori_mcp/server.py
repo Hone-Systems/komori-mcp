@@ -14,6 +14,8 @@ or response shaping — `/v1` already does all three.
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -331,6 +333,103 @@ async def get_theme(
         if val is not None:
             params[key] = val
     return await _call(_client.get, f"/themes/{theme_id}", params=params)
+
+
+# --- Filing Briefings (senki#1022) ------------------------------------------------------------
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Mirrors the API's own ceiling (`MAX_FEED_RANGE_DAYS`); the API is still the authority and
+# rejects the same request with the same reason, this only saves the model a round trip.
+_MAX_BRIEFING_RANGE_DAYS = 92
+
+
+def _briefing_range_error(date_from: str | None, date_to: str | None) -> str | None:
+    parsed = {}
+    for name, value in (("date_from", date_from), ("date_to", date_to)):
+        if value is None:
+            continue
+        if not _DATE_RE.match(value):
+            return f"{name} は YYYY-MM-DD 形式で指定してください（指定: {value}）。"
+        try:
+            parsed[name] = date.fromisoformat(value)
+        except ValueError:
+            return f"{name} は実在する日付で指定してください（指定: {value}）。"
+    if len(parsed) == 2:
+        span = (parsed["date_to"] - parsed["date_from"]).days
+        if span < 0:
+            return f"date_to（{date_to}）が date_from（{date_from}）より前です。"
+        if span > _MAX_BRIEFING_RANGE_DAYS:
+            return (
+                f"期間は最大 {_MAX_BRIEFING_RANGE_DAYS} 日までです（指定: {span} 日）。"
+                "期間を分けて取得してください。"
+            )
+    return None
+
+
+@mcp.tool()
+async def list_filing_briefings(
+    ticker: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 30,
+    cursor: str | None = None,
+) -> dict:
+    """Filing Briefings (決算プレビュー): one per company per reporting period, made before
+    that company's earnings release. Each lists the things worth watching when the results land,
+    built from the company's own threads, prior disclosures and financials, and after the
+    release, whether each one was confirmed. This lists them, soonest results date first.
+    Free.
+
+    `date_from` / `date_to` filter on the scheduled RESULTS DATE (`scheduled_date`, a JST
+    calendar day, YYYY-MM-DD), not on when the briefing was written. Omit both for today through
+    14 days ahead. Give only one and the other is set 14 days away. Past dates work:
+    "briefings for last week's releases" is `date_from` = a week ago, and those rows carry
+    the post-results verdicts when you open them. The widest range is 92 days. Wider is an error,
+    so split the window.
+
+    `ticker` (4-digit TSE code) narrows the list to one company, still inside the window.
+
+    Each row has `ticker`, `period_label` (e.g. `FY2026`, `FY2027-Q1`), `stage` (`scheduled`
+    → `results_announced` → `complete`), and the narrative titles. Pass `ticker` and
+    `period_label` to `get_filing_briefing` for the contents. An empty list means nothing
+    is scheduled in that window. It does NOT mean the company has no upcoming earnings: a
+    briefing exists only once the company's results date is confirmed and within two weeks.
+
+    Up to 60 per page (`limit`). When `next_cursor` is set, pass it back as `cursor` with the
+    same filters to continue.
+    """
+    error = _briefing_range_error(date_from, date_to)
+    if error:
+        return {"is_error": True, "error": error}
+    params: dict[str, Any] = {"limit": limit}
+    for key, val in (("ticker", ticker), ("date_from", date_from), ("date_to", date_to), ("cursor", cursor)):
+        if val is not None:
+            params[key] = val
+    return await _call(_client.get, "/filing-briefings", params=params)
+
+
+@mcp.tool()
+async def get_filing_briefing(ticker: str, period_label: str | None = None) -> dict:
+    """One Filing Briefing in full: its narratives (each with a summary `tldr`, `watch_items`
+    — the specific facts to check in the release — a longer `body`, an optional sourced
+    `graphic`, and `source_ids` keyed into `sources`, which gives each cited disclosure, filing,
+    news story or thread a title, date and komori.app url). After the release each narrative
+    also has a `resolution`, one of confirmed / partially_addressed / contradicted /
+    not_discussed, with the reasoning and its own sources. Before the release `resolution` is
+    null. Also returned: the attached materials and, for half-year and full-year periods, the
+    audited figures reconciled against the preliminary ones.
+
+    `period_label` is the value from `list_filing_briefings` (`FY2026`, `FY2027-Q1`). Omit it
+    for the company's current briefing: the soonest one not yet complete, or the latest one if
+    none is open.
+
+    Costs 1 unit per briefing. Re-reads are always free, and so is any company on your
+    watchlist. A 404 costs nothing. It means there's no briefing for that company/period, not an
+    error to retry.
+
+    A narrative is something to check, not a forecast or a recommendation. Report it that way.
+    """
+    return await _call(_client.get, f"/companies/{ticker}/filing-briefings/{period_label or 'current'}")
 
 
 # --- News / signals ---------------------------------------------------------------------------

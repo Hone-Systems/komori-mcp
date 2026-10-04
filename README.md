@@ -85,13 +85,20 @@ a file under `~/.komori/` with owner-only permissions) so you don't repeat this 
 
 Every tool maps to one `/v1` endpoint — `whoami`, `search`, `search_filing_sections`, `get_trending`,
 `get_changes`, `list_companies`, `get_company`, `list_filings`, `get_filing`, `get_filing_analysis`,
-`get_filing_scenario`, `get_company_threads`, `get_thread`, `list_news`, `get_news_story`,
-`list_signals`, `get_signal`, `get_market_summary`, `list_watchlists`, `create_watchlist`,
-`add_to_watchlist`. Full parameter docs live in each tool's own description (surfaced by your MCP
+`get_filing_scenario`, `get_company_threads`, `get_thread`, `list_themes`, `get_theme`,
+`list_filing_briefings`, `get_filing_briefing`, `list_news`, `get_news_story`, `list_signals`,
+`get_signal`, `get_market_summary`, `list_watchlists`, `create_watchlist`, `add_to_watchlist`. Full parameter docs live in each tool's own description (surfaced by your MCP
 client) and in the canonical contract at `GET https://api.komori.app/v1/openapi.json`.
 
-Reads that cost a unit (threads, filing analysis, scenarios, news detail, signal detail, section
-search) are free forever on re-read, and free for any company on one of your watchlists — normal
+**Filing Briefings** (決算プレビュー) are the pre-earnings briefings: for each company with a
+confirmed results date, the things worth watching when the results land, each with the facts to
+check and its sources, and after the release, whether each one was confirmed. `list_filing_briefings`
+lists them by results date (default: the next 14 days; filter by `ticker` or a `date_from`/`date_to`
+window of up to 92 days, past dates included). `get_filing_briefing(ticker, period_label)` reads one
+(omit `period_label` for the company's current one).
+
+Reads that cost a unit (threads, filing analysis, scenarios, themes, filing briefings, news detail,
+signal detail, section search) are free forever on re-read, and free for any company on one of your watchlists — normal
 research usage rarely touches the budget.
 
 ## Skills
