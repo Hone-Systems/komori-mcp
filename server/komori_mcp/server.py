@@ -401,3 +401,131 @@ async def add_to_watchlist(watchlist_id: str, ticker: str) -> dict:
     """Add one company to a watchlist. Free, idempotent — adding a company already on the list is
     a no-op, not an error."""
     return await _call(_client.put, f"/watchlists/{watchlist_id}/companies/{ticker}")
+
+
+# --- Watchlist notifications (one tool per kind) -------------------------------------------------
+#
+# One tool per KIND of notification rather than a single mode-switch tool (docs/TOOL-DESIGN.md §1's
+# default), by the product owner's explicit ask: "notify me about news on my list" should map to one
+# obviously-named tool. All of them hit `PUT /v1/watchlists/{id}/notifications/{kind}`, which merges
+# into the list's rule server-side — nothing is validated or merged here.
+
+
+
+
+def _switch(watchlist_id: str, kind: str, body: dict[str, Any]):
+    return _call(_client.put, f"/watchlists/{watchlist_id}/notifications/{kind}", body)
+
+
+@mcp.tool()
+async def get_watchlist_notifications(watchlist_id: str) -> dict:
+    """What notifications are switched on for one of your watchlists: documents and news (list-wide
+    and/or per company), the daily performance and risk thresholds, and `delivery` — whether they
+    will actually be delivered (account-wide switch, email address on file, suppressed email). Free.
+    `watchlist_id` is the `id` from `list_watchlists`, not the list's name."""
+    return await _call(_client.get, f"/watchlists/{watchlist_id}/notifications")
+
+
+@mcp.tool()
+async def set_watchlist_document_notifications(watchlist_id: str, enabled: bool, ticker: str | None = None) -> dict:
+    """Switch notifications for NEW DOCUMENTS — statutory filings (有価証券報告書, 四半期/半期報告書)
+    and timely disclosures (適時開示 such as 決算短信) — on or off for one of your watchlists. Free.
+    Emailed in a batch at most once an hour.
+
+    Without `ticker` it applies to every company on the list; with `ticker` (4-digit code, must
+    already be on the list) only to that company. Switching OFF without a ticker also clears any
+    per-company document notifications on that list. If `coverage_note` comes back, the list-wide
+    setting already covers that company, so the per-company switch changes nothing.
+
+    The result's `delivery` says whether anything will actually arrive: if `delivery.note` is
+    set, tell the user plainly (for example, notifications are switched off for the whole
+    account). Never call `set_notification_delivery` unless the user asks for that.
+    """
+    body: dict[str, Any] = {"enabled": enabled}
+    if ticker:
+        body["ticker"] = ticker
+    return await _switch(watchlist_id, "documents", body)
+
+
+@mcp.tool()
+async def set_watchlist_news_notifications(watchlist_id: str, enabled: bool, ticker: str | None = None) -> dict:
+    """Switch NEWS notifications (news stories naming a company on the list) on or off for one of
+    your watchlists. Free. Emailed in a batch at most every six hours.
+
+    Without `ticker` it applies to every company on the list; with `ticker` (4-digit code, must
+    already be on the list) only to that company. Switching OFF without a ticker also clears any
+    per-company news notifications on that list. If `coverage_note` comes back, the list-wide
+    setting already covers that company, so the per-company switch changes nothing.
+
+    The result's `delivery` says whether anything will actually arrive: if `delivery.note` is
+    set, tell the user plainly (for example, notifications are switched off for the whole
+    account). Never call `set_notification_delivery` unless the user asks for that.
+    """
+    body: dict[str, Any] = {"enabled": enabled}
+    if ticker:
+        body["ticker"] = ticker
+    return await _switch(watchlist_id, "news", body)
+
+
+@mcp.tool()
+async def set_watchlist_performance_notification(
+    watchlist_id: str, enabled: bool, percent: float | None = None, direction: str | None = None
+) -> dict:
+    """Switch the daily PERFORMANCE threshold on or off for one of your watchlists. Free.
+
+    Performance is the list's one-day price change as a whole, in PERCENT with its sign.
+    `direction="above"` fires when it rises above `percent`; `"below"` fires when it falls to or
+    below `percent`. A FALL needs a NEGATIVE number: "tell me if my list drops 3% in a day" is
+    percent=-3, direction="below"; "if it gains more than 2%" is percent=2, direction="above".
+    `percent` and `direction` are required when enabling.
+
+    Checked once a day after the close; it fires on the day the value CROSSES to that side of
+    the line, not again on each day it stays there, and the first reading after saving only sets
+    the baseline. Setting it again replaces the previous threshold. To switch off, pass
+    enabled=false alone.
+
+    The result's `delivery` says whether anything will actually arrive: if `delivery.note` is
+    set, tell the user plainly (for example, notifications are switched off for the whole
+    account). Never call `set_notification_delivery` unless the user asks for that.
+    """
+    return await _switch(watchlist_id, "performance", _threshold_body(enabled, percent, direction))
+
+
+@mcp.tool()
+async def set_watchlist_risk_notification(
+    watchlist_id: str, enabled: bool, percent: float | None = None, direction: str | None = None
+) -> dict:
+    """Switch the daily RISK threshold on or off for one of your watchlists. Free.
+
+    Risk is the list's annualised volatility in PERCENT (25 means 25%; typical lists sit around
+    15-40). "Tell me if my list's risk goes above 30%" is percent=30, direction="above"; "below"
+    fires when it falls to or below `percent`. `percent` and `direction` are required when
+    enabling.
+
+    Checked once a day after the close; it fires on the day the value CROSSES to that side of
+    the line, not again on each day it stays there, and the first reading after saving only sets
+    the baseline. Setting it again replaces the previous threshold. To switch off, pass
+    enabled=false alone.
+
+    The result's `delivery` says whether anything will actually arrive: if `delivery.note` is
+    set, tell the user plainly (for example, notifications are switched off for the whole
+    account). Never call `set_notification_delivery` unless the user asks for that.
+    """
+    return await _switch(watchlist_id, "risk", _threshold_body(enabled, percent, direction))
+
+
+def _threshold_body(enabled: bool, percent: float | None, direction: str | None) -> dict[str, Any]:
+    body: dict[str, Any] = {"enabled": enabled}
+    if enabled:
+        body.update({"percent": percent, "direction": direction})
+    return body
+
+
+@mcp.tool()
+async def set_notification_delivery(enabled: bool) -> dict:
+    """The ACCOUNT-WIDE notifications switch: off means no notification from any list reaches you
+    (neither the komori.app inbox nor email), whatever the list settings say. Free. Call it ONLY when
+    the user explicitly asks to turn all their notifications on or off, or agrees after being told it
+    is off — never as a side effect of switching a list's notification on. Returns the new
+    `delivery` status."""
+    return await _call(_client.patch, "/notifications/settings", {"enabled": enabled})

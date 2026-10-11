@@ -1,6 +1,6 @@
 [project]
 name = "komori-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Komori MCP server — Japan-equities disclosure research over the Model Context Protocol"
 requires-python = ">=3.11"
 license = { text = "MIT" }

@@ -87,7 +87,11 @@ Every tool maps to one `/v1` endpoint — `whoami`, `search`, `search_filing_sec
 `get_changes`, `list_companies`, `get_company`, `list_filings`, `get_filing`, `get_filing_analysis`,
 `get_filing_scenario`, `get_company_threads`, `get_thread`, `list_news`, `get_news_story`,
 `list_signals`, `get_signal`, `get_market_summary`, `list_watchlists`, `create_watchlist`,
-`add_to_watchlist`. Full parameter docs live in each tool's own description (surfaced by your MCP
+`add_to_watchlist`, and the watchlist-notification tools — `get_watchlist_notifications`,
+`set_watchlist_document_notifications`, `set_watchlist_news_notifications`,
+`set_watchlist_performance_notification`, `set_watchlist_risk_notification`, and the account-wide
+`set_notification_delivery` (one tool per kind of notification; each result says whether the
+notifications will actually be delivered). Full parameter docs live in each tool's own description (surfaced by your MCP
 client) and in the canonical contract at `GET https://api.komori.app/v1/openapi.json`.
 
 Reads that cost a unit (threads, filing analysis, scenarios, news detail, signal detail, section
