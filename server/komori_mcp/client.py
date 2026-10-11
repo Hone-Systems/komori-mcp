@@ -97,8 +97,8 @@ class KomoriClient:
     async def post(self, path: str, json: dict | None = None) -> KomoriResult:
         return await self.request("POST", path, json=json)
 
-    async def put(self, path: str) -> KomoriResult:
-        return await self.request("PUT", path)
+    async def put(self, path: str, json: dict | None = None) -> KomoriResult:
+        return await self.request("PUT", path, json=json)
 
     async def delete(self, path: str) -> KomoriResult:
         return await self.request("DELETE", path)

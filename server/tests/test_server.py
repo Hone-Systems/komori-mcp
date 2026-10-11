@@ -97,3 +97,61 @@ async def test_company_threads_default_mode_is_unchanged(monkeypatch):
         "/companies/7203/threads",
         {"move": "SOFTENED", "since": "FY2023"},
     )]
+
+
+# --- Watchlist notifications (senki: one tool per kind) ------------------------------------------
+
+
+class _WriteClient(_FakeClient):
+    async def put(self, path, json=None):
+        self.calls.append((path, json))
+        return self.result
+
+    async def patch(self, path, json=None):
+        self.calls.append((path, json))
+        return self.result
+
+
+def _fake_writes(monkeypatch) -> _WriteClient:
+    fake = _WriteClient()
+    monkeypatch.setattr(server, "_client", fake)
+    return fake
+
+
+async def test_each_notification_kind_is_its_own_tool_on_its_own_path(monkeypatch):
+    fake = _fake_writes(monkeypatch)
+    await server.set_watchlist_document_notifications("wl1", True)
+    await server.set_watchlist_news_notifications("wl1", False, ticker="8306")
+    await server.set_watchlist_performance_notification("wl1", True, percent=-3, direction="below")
+    await server.set_watchlist_risk_notification("wl1", False)
+    assert fake.calls == [
+        ("/watchlists/wl1/notifications/documents", {"enabled": True}),
+        ("/watchlists/wl1/notifications/news", {"enabled": False, "ticker": "8306"}),
+        ("/watchlists/wl1/notifications/performance", {"enabled": True, "percent": -3, "direction": "below"}),
+        # Switching off sends no threshold — the server deletes it, it does not need the old value.
+        ("/watchlists/wl1/notifications/risk", {"enabled": False}),
+    ]
+
+
+async def test_get_notifications_and_the_account_switch(monkeypatch):
+    fake = _fake_writes(monkeypatch)
+    await server.get_watchlist_notifications("wl1")
+    await server.set_notification_delivery(False)
+    assert fake.calls == [
+        ("/watchlists/wl1/notifications", None),
+        ("/notifications/settings", {"enabled": False}),
+    ]
+
+
+async def test_notification_tool_descriptions_spell_out_units_and_delivery():
+    tools = {t.name: t for t in await server.mcp.list_tools()}
+    perf = tools["set_watchlist_performance_notification"].description
+    assert "NEGATIVE" in perf and "percent=-3" in perf and "delivery" in perf
+    assert "ACCOUNT-WIDE" in tools["set_notification_delivery"].description
+    for name in (
+        "get_watchlist_notifications",
+        "set_watchlist_document_notifications",
+        "set_watchlist_news_notifications",
+        "set_watchlist_risk_notification",
+    ):
+        assert tools[name].description, name
