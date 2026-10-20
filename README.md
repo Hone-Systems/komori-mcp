@@ -5,11 +5,29 @@ threads tracked across a company's filing history), scenario trees, and semantic
 a company actually wrote, not just its headlines. Built on the [Komori external API](https://api.komori.app/v1)
 (`GET /v1/openapi.json` for the full contract).
 
-Requires a [Komori Plus](https://komori.app/plans) subscription. No pasted tokens: connecting
-opens a real login in your browser, and a personal API token is minted and handed back
-automatically — the same pattern `gh auth login --web` uses.
+Free with a [komori.app](https://komori.app) account. No pasted tokens: connecting opens a real
+login in your browser — the hosted server uses standard MCP OAuth, the local one mints a personal
+API token and hands it back automatically (the same pattern `gh auth login --web` uses).
+
+Every tool result carries `source` — the page on komori.app it came from — so an answer built on
+Komori can link its reader to the evidence.
 
 ## Install
+
+### Hosted server (Claude.ai, ChatGPT, any client that speaks remote MCP)
+
+Add a custom connector / remote MCP server with the URL
+
+```
+https://mcp.komori.app/mcp
+```
+
+Your client discovers the authorization server on its own, opens komori.app for you to sign in and
+approve, and is connected. The hosted server is **read-only**: research tools only, no watchlist or
+notification changes (use komori.app or the local server for those). Disconnect any time at
+komori.app → 設定 → 接続中のアプリ.
+
+The local install below has the same tools plus the watchlist/notification writes.
 
 ### Claude Code
 
@@ -108,6 +126,36 @@ one returns:
   supported / extrapolation / not addressed.
 - **`language-drift`** — track how one commitment's wording has shifted across a company's filing
   history.
+
+## Hosted server
+
+`KOMORI_MCP_TRANSPORT=streamable-http` runs the hosted server (`komori_mcp/http.py`): Streamable HTTP
+at `/mcp`, stateless, behind OAuth 2.1 per the MCP authorization spec —
+
+- OAuth 2.0 Protected Resource Metadata (RFC 9728) at `/.well-known/oauth-protected-resource/mcp`
+  (and at the root); a request without a valid token gets `401` with
+  `WWW-Authenticate: Bearer resource_metadata="…", scope="komori:read"`.
+- Tokens are issued by Komori's authorization server (`https://api.komori.app`, RFC 8414 metadata,
+  PKCE S256, dynamic client registration and Client ID Metadata Documents) and bound to this server's
+  URL (RFC 8707). Every request's token is introspected (RFC 7662) — never cached — so a revoked
+  connection fails on the next request.
+- The client's token is never forwarded to the Komori API. It is exchanged (RFC 8693) for a short
+  `/v1` credential for the same person; the API meters and rate-limits it like any other call.
+- Read tools only; the API also refuses writes for this credential.
+
+| Variable | |
+|---|---|
+| `KOMORI_OAUTH_ISSUER` | the authorization server's issuer (public URL) — required |
+| `KOMORI_MCP_RESOURCE` | this server's canonical URL, e.g. `https://mcp.komori.app/mcp` — required |
+| `KOMORI_MCP_CLIENT_SECRET` | this server's confidential-client secret at the AS — required |
+| `KOMORI_API_BASE` | the `/v1` base — required |
+| `KOMORI_OAUTH_INTERNAL_BASE` | where to reach the AS if not at the issuer URL (e.g. a private network) |
+| `KOMORI_MCP_ALLOWED_HOSTS` / `KOMORI_MCP_ALLOWED_ORIGINS` | Host / Origin allow-lists (DNS-rebinding protection) |
+| `KOMORI_MCP_HOST` / `KOMORI_MCP_PORT` | bind address (default `127.0.0.1:8722`) |
+
+The server emits OpenTelemetry spans and metrics through `opentelemetry-api` — a no-op unless the
+process installs an SDK, which the hosted image does. `server.json` is its
+[MCP Registry](https://registry.modelcontextprotocol.io) entry (`app.komori/komori`, remote only).
 
 ## Development
 

@@ -1,0 +1,9 @@
+{
+  "client_id": "https://raw.githubusercontent.com/Hone-Systems/komori-mcp/factory/1074-remote-mcp/qa/client-metadata.json",
+  "client_name": "Komori MCP QA client (CIMD)",
+  "client_uri": "https://github.com/Hone-Systems/komori-mcp",
+  "redirect_uris": ["http://127.0.0.1:33418/callback", "http://localhost:33418/callback"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}

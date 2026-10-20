@@ -1,0 +1,19 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "app.komori/komori",
+  "title": "Komori",
+  "description": "Japan-equities disclosure research: EDINET filings, TDnet disclosures, 変遷 threads, themes.",
+  "version": "0.3.0",
+  "websiteUrl": "https://komori.app",
+  "repository": {
+    "url": "https://github.com/Hone-Systems/komori-mcp",
+    "source": "github",
+    "subfolder": "server"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.komori.app/mcp"
+    }
+  ]
+}

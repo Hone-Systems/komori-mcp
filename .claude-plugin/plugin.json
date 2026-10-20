@@ -1,7 +1,7 @@
 {
   "name": "komori",
   "displayName": "Komori",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Japan-equities disclosure research — filings, 変遷 narrative threads, scenario trees, and semantic search over what a company actually wrote.",
   "author": { "name": "Komori", "url": "https://komori.app" },
   "homepage": "https://komori.app",
