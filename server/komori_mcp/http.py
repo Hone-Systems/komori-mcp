@@ -122,12 +122,16 @@ class AuthorizationServer:
         except httpx.HTTPError as exc:
             logger.error("token exchange unreachable: %s", type(exc).__name__)
             raise UpstreamUnavailable("Komoriに一時的に接続できません。少し待ってからもう一度お試しください。") from exc
-        if resp.status_code == 400 and resp.json().get("error") == "invalid_grant":
+        try:
+            body = resp.json()
+        except ValueError:
+            body = None
+        if resp.status_code == 400 and isinstance(body, dict) and body.get("error") == "invalid_grant":
             raise KomoriApiError(401, "this connection is no longer valid")
-        if resp.status_code != 200:
-            logger.error("token exchange failed with HTTP %s", resp.status_code)
+        if resp.status_code != 200 or not isinstance(body, dict) or not isinstance(body.get("access_token"), str):
+            logger.error("token exchange failed (HTTP %s, usable body: %s)", resp.status_code, isinstance(body, dict))
             raise UpstreamUnavailable("Komoriに一時的に接続できません。少し待ってからもう一度お試しください。")
-        return resp.json()
+        return body
 
 
 class IntrospectionVerifier:

@@ -19,7 +19,7 @@ import pytest
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
@@ -38,6 +38,9 @@ class _AuthorizationServer:
         self.exchanges = 0
         self.exchange_down = False
         self.api_down = False
+        # "": normal; otherwise one of the malformed answers below.
+        self.exchange_garbage = ""
+        self.api_garbage = ""
 
     def _authorised(self, request: Request) -> bool:
         expected = "Basic " + base64.b64encode(f"komori-mcp-server:{SECRET}".encode()).decode()
@@ -61,6 +64,10 @@ class _AuthorizationServer:
         form = await request.form()
         if self.exchange_down:
             return JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
+        if self.exchange_garbage == "not-json":
+            return PlainTextResponse("<html>bad gateway</html>", status_code=200)
+        if self.exchange_garbage == "no-token":
+            return JSONResponse({"token_type": "Bearer"}, status_code=200)
         if form.get("subject_token") not in self.active:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
         self.exchanges += 1
@@ -71,6 +78,10 @@ class _AuthorizationServer:
     async def company(self, request: Request):
         if self.api_down:
             return JSONResponse({"detail": "サーバーエラーが発生しました"}, status_code=503)
+        if self.api_garbage == "list-503":
+            return JSONResponse(["oops"], status_code=503)
+        if self.api_garbage == "not-json-200":
+            return PlainTextResponse("not json", status_code=200)
         bearer = request.headers.get("authorization", "")[7:]
         if bearer not in self.exchanged or bearer in self.revoked_upstream:
             return JSONResponse({"detail": "Invalid token"}, status_code=401)
@@ -253,4 +264,58 @@ def test_tool_outcomes_separate_a_callers_mistake_from_an_outage():
     assert server._outcome({"is_error": True, "status_code": 429}) == "error"
     assert server._outcome({"is_error": True, "status_code": 503}) == "failure"
     assert server._outcome({"is_error": True, "status_code": 0}) == "failure"
-    assert server._outcome({"is_error": True, "error": "login timed out"}) == "failure"
+    assert server._outcome({"is_error": True, "status_code": 502}) == "failure"
+    # Every error carries a status; a status-less one is never counted as an outage.
+    assert server._outcome({"is_error": True, "error": "no status"}) == "error"
+
+
+class _Counter:
+    def __init__(self):
+        self.adds: list[dict] = []
+
+    def add(self, n, attributes=None):
+        self.adds.append(dict(attributes or {}))
+
+
+def test_every_failure_shape_is_sourced_flagged_and_counted_as_komoris(client, stub, monkeypatch):
+    """Code review round 5: malformed upstream answers (an exchange that is not JSON or carries no
+    token, a /v1 error body that is a JSON list, a /v1 200 that is not JSON) escaped as raw SDK errors
+    with no source and no counter, or counted as the caller's error. Each must be an MCP error with
+    its komori.app source, counted outcome=failure — and the next call must recover."""
+    from komori_mcp import server
+
+    counter = _Counter()
+    monkeypatch.setattr(server, "_tool_calls", counter)
+
+    def call(token):
+        stub.active.add(token)
+        resp = _rpc(client, token, "tools/call", {"name": "get_company", "arguments": {"ticker": "6501"}})
+        assert resp.status_code == 200, resp.text
+        return resp.json()["result"]
+
+    cases = (("exchange_garbage", "not-json"), ("exchange_garbage", "no-token"), ("api_garbage", "list-503"), ("api_garbage", "not-json-200"))
+    for i, (side, value) in enumerate(cases):
+        # A token of its own per case: an uncached credential, so the exchange cases reach the exchange.
+        setattr(stub, side, value)
+        try:
+            result = call(f"komori_oat_shape_{i}")
+        finally:
+            setattr(stub, side, "")
+        assert result["isError"] is True, (side, value, result)
+        assert result["structuredContent"]["source"]["url"].startswith("https://komori.app/company/6501"), (side, value)
+        assert counter.adds[-1] == {"tool": "get_company", "outcome": "failure"}, (side, value, counter.adds[-1])
+
+    assert call("komori_oat_shape_ok").get("isError") in (False, None)
+    assert counter.adds[-1] == {"tool": "get_company", "outcome": "ok"}
+
+
+def test_a_parameter_combination_refused_locally_is_the_callers_error_not_an_outage(client, stub, monkeypatch):
+    from komori_mcp import server
+
+    counter = _Counter()
+    monkeypatch.setattr(server, "_tool_calls", counter)
+    stub.active.add("komori_oat_local")
+    resp = _rpc(client, "komori_oat_local", "tools/call", {"name": "get_company_threads", "arguments": {"ticker": "7203", "themes": True, "move": "RAISED"}})
+    result = resp.json()["result"]
+    assert result["isError"] is True and result["structuredContent"]["status_code"] == 400
+    assert counter.adds[-1] == {"tool": "get_company_threads", "outcome": "error"}

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -36,6 +37,8 @@ from opentelemetry import metrics, trace
 from komori_mcp import pages
 from komori_mcp.auth import clear_stored_token, get_token
 from komori_mcp.client import KomoriApiError, KomoriClient, KomoriResult
+
+logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
     "Komori is a Japan-equities disclosure research tool. Every result carries a standing "
@@ -90,7 +93,13 @@ async def _call(fn, *args, **kwargs) -> dict[str, Any]:
                 continue  # one retry, through a fresh login
             return _error(exc.status_code, exc.detail, path, params)
         except TimeoutError as exc:
-            return {"is_error": True, "error": str(exc), "source": pages.source(None, path, params)}
+            # The local browser login was not completed in time: the person's step, not an outage.
+            return {"is_error": True, "status_code": 408, "error": str(exc), "source": pages.source(None, path, params)}
+        except Exception:
+            # Anything else is a defect on our side. Answered like every other failure — sourced,
+            # counted as a failure — rather than escaping to the transport as a bare SDK error.
+            logger.exception("tool call failed unexpectedly")
+            return _error(500, "Komoriで予期しないエラーが発生しました。少し待ってからもう一度お試しください。", path, params)
 
 
 def _error(status_code: int, detail: str, path: str | None, params: dict | None) -> dict[str, Any]:
@@ -109,12 +118,14 @@ def _shape(result: KomoriResult, path: str | None = None, params: dict | None = 
 
 def _outcome(result: Any) -> str:
     """`ok`; `error` — the caller's request was refused (a 4xx: unknown ticker, bad filter, budget
-    spent); `failure` — Komori could not serve it (5xx, unreachable). Only failures page anyone
-    (grafana/alerts/mcp-health.json in senki): a caller's mistake is not an outage."""
+    spent, a parameter combination rejected here); `failure` — Komori could not serve it (5xx,
+    unreachable = status 0). Only failures page anyone (grafana/alerts/mcp-health.json in senki): a
+    caller's mistake is not an outage. Every error result carries a status; one without is counted
+    as the caller's, never as an outage."""
     if not (isinstance(result, dict) and result.get("is_error")):
         return "ok"
     status = result.get("status_code")
-    return "failure" if status is None or status == 0 or status >= 500 else "error"
+    return "failure" if status is not None and (status == 0 or status >= 500) else "error"
 
 
 def _instrumented(fn):
@@ -131,7 +142,14 @@ def _instrumented(fn):
         started = time.monotonic()
         with _tracer.start_as_current_span("mcp.tool") as span:
             span.set_attribute("mcp.tool.name", fn.__name__)
-            result = await fn(*args, **kwargs)
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception:
+                # A tool body that raised outside `_call` (argument handling, a defect). Counted as
+                # the failure it is before the SDK reports it.
+                _tool_calls.add(1, {"tool": fn.__name__, "outcome": "failure"})
+                _tool_duration.record(time.monotonic() - started, {"tool": fn.__name__})
+                raise
             outcome = _outcome(result)
             span.set_attribute("mcp.tool.outcome", outcome)
             if isinstance(result, dict):
@@ -328,6 +346,7 @@ async def get_company_threads(
             # The same error shape `_call` returns, so the model sees one contract.
             return {
                 "is_error": True,
+                "status_code": 400,
                 "error": "themes=True のときはスレッドの絞り込み（ids / move / kind / "
                 "latest_move / since）は指定できません。テーマを取得する場合は ticker だけを"
                 "指定してください。",

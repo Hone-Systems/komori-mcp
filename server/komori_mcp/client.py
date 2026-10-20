@@ -64,15 +64,20 @@ class KomoriClient:
 
         if resp.status_code >= 400:
             try:
-                detail = resp.json().get("detail", resp.text)
+                parsed = resp.json()
             except ValueError:
-                detail = resp.text
+                parsed = None
+            detail = parsed.get("detail", resp.text) if isinstance(parsed, dict) else resp.text
             raise KomoriApiError(resp.status_code, str(detail))
 
+        # A 2xx that is not the `{"data": ...}` object is the API misbehaving, not the caller asking
+        # wrongly — 502, so it is counted (and alerted on) as Komori's failure, never the caller's.
         try:
             body = resp.json()
         except ValueError as exc:
-            raise KomoriApiError(resp.status_code, "The API returned a response that wasn't valid JSON.") from exc
+            raise KomoriApiError(502, "The API returned a response that wasn't valid JSON.") from exc
+        if not isinstance(body, dict):
+            raise KomoriApiError(502, "The API returned an unexpected response shape.")
 
         # A malformed unit header is a metering-display problem, not a reason to fail an
         # otherwise-successful read — the caller still gets its data, just without a units figure.
