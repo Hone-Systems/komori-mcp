@@ -6,28 +6,13 @@ a company actually wrote, not just its headlines. Built on the [Komori external 
 (`GET /v1/openapi.json` for the full contract).
 
 Free with a [komori.app](https://komori.app) account. No pasted tokens: connecting opens a real
-login in your browser — the hosted server uses standard MCP OAuth, the local one mints a personal
-API token and hands it back automatically (the same pattern `gh auth login --web` uses).
+login in your browser and a personal API token is minted and handed back automatically (the same
+pattern `gh auth login --web` uses).
 
 Every tool result carries `source` — the page on komori.app it came from — so an answer built on
 Komori can link its reader to the evidence.
 
 ## Install
-
-### Hosted server (Claude.ai, ChatGPT, any client that speaks remote MCP)
-
-Add a custom connector / remote MCP server with the URL
-
-```
-https://mcp.komori.app/mcp
-```
-
-Your client discovers the authorization server on its own, opens komori.app for you to sign in and
-approve, and is connected. The hosted server is **read-only**: research tools only, no watchlist or
-notification changes (use komori.app or the local server for those). Disconnect any time at
-komori.app → 設定 → 接続中のアプリ.
-
-The local install below has the same tools plus the watchlist/notification writes.
 
 ### Claude Code
 
@@ -88,6 +73,15 @@ There's no plugin/bundle system for these — add the server directly.
 
 No `uv`? `pip install -e ./server` from a clone of this repo, then point `command` at `komori-mcp`
 (the installed console script) or `python -m komori_mcp` directly.
+
+### Hosted server (Claude.ai, ChatGPT) — not live yet
+
+A hosted version is being rolled out at `https://mcp.komori.app/mcp` so that Claude.ai, ChatGPT and
+any other remote-MCP client can connect with a URL instead of an install. **It does not answer yet**;
+komori.app will list it (and this line will change) once it does. When it is live: add it as a
+custom connector, sign in on komori.app and approve, and you are connected. It will be
+**read-only** — research tools only, no watchlist or notification changes — and disconnectable at
+komori.app → 設定 → 接続中のアプリ.
 
 ## How login works
 

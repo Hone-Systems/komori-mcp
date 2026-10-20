@@ -24,12 +24,13 @@ hosted server to the keychain login.
 from __future__ import annotations
 
 import functools
+import json
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from opentelemetry import metrics, trace
 
 from komori_mcp import pages
@@ -106,10 +107,24 @@ def _shape(result: KomoriResult, path: str | None = None, params: dict | None = 
     return out
 
 
+def _outcome(result: Any) -> str:
+    """`ok`; `error` — the caller's request was refused (a 4xx: unknown ticker, bad filter, budget
+    spent); `failure` — Komori could not serve it (5xx, unreachable). Only failures page anyone
+    (grafana/alerts/mcp-health.json in senki): a caller's mistake is not an outage."""
+    if not (isinstance(result, dict) and result.get("is_error")):
+        return "ok"
+    status = result.get("status_code")
+    return "failure" if status is None or status == 0 or status >= 500 else "error"
+
+
 def _instrumented(fn):
-    """A span and two metrics per tool call. `opentelemetry-api` only: with no SDK installed (a local
-    stdio install) every call here is a no-op; the hosted image installs the SDK first. Never the
-    token, never a user id on a metric label."""
+    """A span and two metrics per tool call, and the MCP error flag on a failed one. `opentelemetry-api`
+    only: with no SDK installed (a local stdio install) the telemetry here is a no-op; the hosted
+    image installs the SDK first. Never the token, never a user id on a metric label.
+
+    A failed call is returned as `CallToolResult(isError=True)` carrying the same JSON as a success
+    — `source` included — so a client sees the failure as a failure (not as data) and still gets the
+    komori.app page to send its reader to."""
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
@@ -117,7 +132,7 @@ def _instrumented(fn):
         with _tracer.start_as_current_span("mcp.tool") as span:
             span.set_attribute("mcp.tool.name", fn.__name__)
             result = await fn(*args, **kwargs)
-            outcome = "error" if isinstance(result, dict) and result.get("is_error") else "ok"
+            outcome = _outcome(result)
             span.set_attribute("mcp.tool.outcome", outcome)
             if isinstance(result, dict):
                 if result.get("status_code") is not None:
@@ -126,7 +141,13 @@ def _instrumented(fn):
                     span.set_attribute("komori.units_charged", result["_units"].get("charged") or 0)
             _tool_calls.add(1, {"tool": fn.__name__, "outcome": outcome})
             _tool_duration.record(time.monotonic() - started, {"tool": fn.__name__})
-            return result
+            if outcome == "ok":
+                return result
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))],
+                structuredContent=result,
+                isError=True,
+            )
 
     return wrapper
 

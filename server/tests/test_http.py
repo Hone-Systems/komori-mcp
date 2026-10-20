@@ -36,6 +36,8 @@ class _AuthorizationServer:
         self.revoked_upstream: set[str] = set()
         self.introspections = 0
         self.exchanges = 0
+        self.exchange_down = False
+        self.api_down = False
 
     def _authorised(self, request: Request) -> bool:
         expected = "Basic " + base64.b64encode(f"komori-mcp-server:{SECRET}".encode()).decode()
@@ -57,6 +59,8 @@ class _AuthorizationServer:
         if not self._authorised(request):
             return JSONResponse({"error": "invalid_client"}, status_code=401)
         form = await request.form()
+        if self.exchange_down:
+            return JSONResponse({"error": "temporarily_unavailable"}, status_code=503)
         if form.get("subject_token") not in self.active:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
         self.exchanges += 1
@@ -65,6 +69,8 @@ class _AuthorizationServer:
         return JSONResponse({"access_token": upstream, "expires_in": 600, "token_type": "Bearer"})
 
     async def company(self, request: Request):
+        if self.api_down:
+            return JSONResponse({"detail": "サーバーエラーが発生しました"}, status_code=503)
         bearer = request.headers.get("authorization", "")[7:]
         if bearer not in self.exchanged or bearer in self.revoked_upstream:
             return JSONResponse({"detail": "Invalid token"}, status_code=401)
@@ -210,3 +216,41 @@ def test_startup_refuses_to_run_without_its_authorization_settings(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(RuntimeError, match="KOMORI_OAUTH_ISSUER"):
         hosted.create_app()
+
+
+def test_an_upstream_outage_is_a_flagged_failure_that_still_names_its_komori_page(client, stub):
+    """Code review (QA second opinion): a failed exchange used to surface as raw exception text with no
+    `source` and no failure metric, and a /v1 503 came back with isError=false — an outage looked like
+    data. Both must be MCP errors carrying the source link, and the next call must recover."""
+    stub.active.add("komori_oat_outage")
+    stub.exchange_down = True
+    try:
+        down = _rpc(client, "komori_oat_outage", "tools/call", {"name": "get_company", "arguments": {"ticker": "4063"}})
+    finally:
+        stub.exchange_down = False
+    result = down.json()["result"]
+    assert down.status_code == 200 and result["isError"] is True
+    assert result["structuredContent"]["status_code"] == 503
+    assert result["structuredContent"]["source"]["url"].startswith("https://komori.app/company/4063")
+
+    stub.api_down = True
+    try:
+        api_down = _rpc(client, "komori_oat_outage", "tools/call", {"name": "get_company", "arguments": {"ticker": "4063"}})
+    finally:
+        stub.api_down = False
+    assert api_down.json()["result"]["isError"] is True
+    assert api_down.json()["result"]["structuredContent"]["status_code"] == 503
+
+    recovered = _rpc(client, "komori_oat_outage", "tools/call", {"name": "get_company", "arguments": {"ticker": "4063"}})
+    assert recovered.json()["result"].get("isError") in (False, None)
+
+
+def test_tool_outcomes_separate_a_callers_mistake_from_an_outage():
+    from komori_mcp import server
+
+    assert server._outcome({"data": 1}) == "ok"
+    assert server._outcome({"is_error": True, "status_code": 404}) == "error"
+    assert server._outcome({"is_error": True, "status_code": 429}) == "error"
+    assert server._outcome({"is_error": True, "status_code": 503}) == "failure"
+    assert server._outcome({"is_error": True, "status_code": 0}) == "failure"
+    assert server._outcome({"is_error": True, "error": "login timed out"}) == "failure"

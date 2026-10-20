@@ -85,6 +85,15 @@ def _key(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+class UpstreamUnavailable(KomoriApiError):
+    """Komori's authorization server could not issue the `/v1` credential (down, misconfigured, or
+    refusing our own client secret). A server-side fault: reported to the caller as a failed tool
+    call (503), counted as a failure, never mistaken for the caller's connection being revoked."""
+
+    def __init__(self, detail: str):
+        super().__init__(503, detail)
+
+
 class AuthorizationServer:
     """The two confidential-client calls this server makes to Komori's authorization server."""
 
@@ -105,14 +114,19 @@ class AuthorizationServer:
         return resp.json()
 
     async def exchange(self, token: str) -> dict:
-        resp = await self._post(
-            "/oauth/token",
-            {"grant_type": TOKEN_EXCHANGE, "subject_token": token, "subject_token_type": ACCESS_TOKEN_TYPE},
-        )
+        try:
+            resp = await self._post(
+                "/oauth/token",
+                {"grant_type": TOKEN_EXCHANGE, "subject_token": token, "subject_token_type": ACCESS_TOKEN_TYPE},
+            )
+        except httpx.HTTPError as exc:
+            logger.error("token exchange unreachable: %s", type(exc).__name__)
+            raise UpstreamUnavailable("Komoriに一時的に接続できません。少し待ってからもう一度お試しください。") from exc
         if resp.status_code == 400 and resp.json().get("error") == "invalid_grant":
             raise KomoriApiError(401, "this connection is no longer valid")
         if resp.status_code != 200:
-            raise RuntimeError(f"token exchange failed with HTTP {resp.status_code}")
+            logger.error("token exchange failed with HTTP %s", resp.status_code)
+            raise UpstreamUnavailable("Komoriに一時的に接続できません。少し待ってからもう一度お試しください。")
         return resp.json()
 
 
