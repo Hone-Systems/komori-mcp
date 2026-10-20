@@ -28,7 +28,7 @@ import os
 import time
 from collections import OrderedDict
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from mcp.server.auth.middleware.auth_context import get_access_token
@@ -37,10 +37,12 @@ from mcp.server.auth.routes import build_resource_metadata_url
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from opentelemetry import metrics
+from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from komori_mcp import server
@@ -250,10 +252,7 @@ def create_app() -> ASGIApp:
         "resource_documentation": "https://github.com/Hone-Systems/komori-mcp#hosted-server",
     }
 
-    # RFC 9728 puts metadata at the path of the resource (the SDK serves that one); clients that
-    # probe the root first, or a resource without a path, find the same document here.
-    @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
-    async def protected_resource_root(_: Request) -> JSONResponse:
+    async def protected_resource(_: Request) -> JSONResponse:
         return JSONResponse(metadata, headers={"Cache-Control": "public, max-age=3600"})
 
     @mcp.custom_route("/healthz", methods=["GET"])
@@ -261,6 +260,14 @@ def create_app() -> ASGIApp:
         return JSONResponse({"ok": True})
 
     app: Starlette = mcp.streamable_http_app()
+    # Our own protected-resource metadata, served at the resource's path (RFC 9728 §3.1) AND at the
+    # root (clients that probe it first), ahead of the SDK's copy. The SDK renders the issuer through
+    # its URL type, which appends "/" to a root URL — and RFC 8414 clients compare the issuer byte
+    # for byte with the authorization server's own `issuer` (which has no slash). Serving the exact
+    # string is the fix; the SDK's route stays registered behind ours, unreachable.
+    metadata_path = urlsplit(str(build_resource_metadata_url(AnyHttpUrl(resource)))).path
+    for path in dict.fromkeys((metadata_path, "/.well-known/oauth-protected-resource")):
+        app.router.routes.insert(0, Route(path, protected_resource, methods=["GET"]))
     logger.info(
         "komori-mcp hosted server ready (resource=%s issuer=%s metadata=%s)",
         resource,

@@ -147,8 +147,10 @@ def test_no_token_is_a_401_that_says_where_to_authorise_and_what_to_ask_for(clie
 def test_protected_resource_metadata_is_served_at_the_path_and_the_root(client):
     for path in ("/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource"):
         doc = client.get(path).json()
-        assert doc["resource"].rstrip("/") == RESOURCE, path
-        assert [a.rstrip("/") for a in doc["authorization_servers"]] == ["http://localhost"], path
+        # Exact strings: RFC 8414 clients compare the issuer byte for byte, and the SDK's own copy
+        # of this document would have said "http://localhost/".
+        assert doc["resource"] == RESOURCE, path
+        assert doc["authorization_servers"] == ["http://localhost"], path
         assert doc["scopes_supported"] == ["komori:read"], path
     assert client.get("/healthz").json() == {"ok": True}
 
