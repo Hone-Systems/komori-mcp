@@ -128,7 +128,8 @@ class AuthorizationServer:
             body = None
         if resp.status_code == 400 and isinstance(body, dict) and body.get("error") == "invalid_grant":
             raise KomoriApiError(401, "this connection is no longer valid")
-        if resp.status_code != 200 or not isinstance(body, dict) or not isinstance(body.get("access_token"), str):
+        token = body.get("access_token") if isinstance(body, dict) else None
+        if resp.status_code != 200 or not isinstance(token, str) or not token.strip():
             logger.error("token exchange failed (HTTP %s, usable body: %s)", resp.status_code, isinstance(body, dict))
             raise UpstreamUnavailable("Komoriに一時的に接続できません。少し待ってからもう一度お試しください。")
         return body

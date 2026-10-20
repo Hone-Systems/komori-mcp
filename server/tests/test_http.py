@@ -68,6 +68,8 @@ class _AuthorizationServer:
             return PlainTextResponse("<html>bad gateway</html>", status_code=200)
         if self.exchange_garbage == "no-token":
             return JSONResponse({"token_type": "Bearer"}, status_code=200)
+        if self.exchange_garbage == "empty-token":
+            return JSONResponse({"access_token": "", "expires_in": 600}, status_code=200)
         if form.get("subject_token") not in self.active:
             return JSONResponse({"error": "invalid_grant"}, status_code=400)
         self.exchanges += 1
@@ -82,6 +84,10 @@ class _AuthorizationServer:
             return JSONResponse(["oops"], status_code=503)
         if self.api_garbage == "not-json-200":
             return PlainTextResponse("not json", status_code=200)
+        if self.api_garbage == "empty-200":
+            return JSONResponse({}, status_code=200)
+        if self.api_garbage == "error-object-200":
+            return JSONResponse({"error": "temporarily_unavailable"}, status_code=200)
         bearer = request.headers.get("authorization", "")[7:]
         if bearer not in self.exchanged or bearer in self.revoked_upstream:
             return JSONResponse({"detail": "Invalid token"}, status_code=401)
@@ -293,7 +299,15 @@ def test_every_failure_shape_is_sourced_flagged_and_counted_as_komoris(client, s
         assert resp.status_code == 200, resp.text
         return resp.json()["result"]
 
-    cases = (("exchange_garbage", "not-json"), ("exchange_garbage", "no-token"), ("api_garbage", "list-503"), ("api_garbage", "not-json-200"))
+    cases = (
+        ("exchange_garbage", "not-json"),
+        ("exchange_garbage", "no-token"),
+        ("exchange_garbage", "empty-token"),
+        ("api_garbage", "list-503"),
+        ("api_garbage", "not-json-200"),
+        ("api_garbage", "empty-200"),
+        ("api_garbage", "error-object-200"),
+    )
     for i, (side, value) in enumerate(cases):
         # A token of its own per case: an uncached credential, so the exchange cases reach the exchange.
         setattr(stub, side, value)

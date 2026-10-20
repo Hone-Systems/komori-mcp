@@ -76,7 +76,10 @@ class KomoriClient:
             body = resp.json()
         except ValueError as exc:
             raise KomoriApiError(502, "The API returned a response that wasn't valid JSON.") from exc
-        if not isinstance(body, dict):
+        # Every /v1 success is `{"data": ...}` (data may legitimately be null). A 2xx without the key
+        # — `{}`, an error object — is the API misbehaving: reported and counted as a failure, never
+        # passed on as an empty success.
+        if not isinstance(body, dict) or "data" not in body:
             raise KomoriApiError(502, "The API returned an unexpected response shape.")
 
         # A malformed unit header is a metering-display problem, not a reason to fail an
