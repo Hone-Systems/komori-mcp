@@ -8,67 +8,171 @@ Every tool is a direct mapping to one `/v1` endpoint (docs/TOOL-DESIGN.md §1 �
 already shaped as one job per route, so a tool-per-route is the right granularity here, not a
 mode-switch over near-duplicates). This module owns tool descriptions, parameter validation the
 API itself would reject anyway (so the model gets a fast, cheap error), and threading the API's own
-`notice` field and unit-cost headers into every result. It does not re-implement metering, tiering,
-or response shaping — `/v1` already does all three.
+`notice` field, unit-cost headers and the komori.app source page into every result. It does not
+re-implement metering, tiering, or response shaping — `/v1` already does all three.
+
+TWO TRANSPORTS, ONE TOOL SET
+----------------------------
+The tools are plain module functions, registered onto a FastMCP server by `build_server`. The
+module-level `mcp` is the local (stdio) server with every tool. The hosted server (`http.py`, senki
+#1074) builds its own with the read tools only — read-only is the launch scope — and swaps the token
+source: locally the token comes from the keychain and a browser login; hosted, it is the exchanged
+`/v1` credential for the caller whose OAuth token the request carried. There is no path from the
+hosted server to the keychain login.
 """
 
 from __future__ import annotations
 
+import functools
+import json
+import logging
+import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from opentelemetry import metrics, trace
 
+from komori_mcp import pages
 from komori_mcp.auth import clear_stored_token, get_token
 from komori_mcp.client import KomoriApiError, KomoriClient, KomoriResult
 
-mcp = FastMCP(
-    "komori",
-    instructions=(
-        "Komori is a Japan-equities disclosure research tool. Every result carries a standing "
-        "notice: this is a research aid, not financial advice. Present findings as things to go "
-        "look at — what changed, what a company said, what a filing shows — never as a "
-        "recommendation. No buy/sell language, no bear cases on individual names. "
-        "Call `whoami` first in a new session to see the account's remaining unit budget."
-    ),
+logger = logging.getLogger(__name__)
+
+INSTRUCTIONS = (
+    "Komori is a Japan-equities disclosure research tool. Every result carries a standing "
+    "notice: this is a research aid, not financial advice. Present findings as things to go "
+    "look at — what changed, what a company said, what a filing shows — never as a "
+    "recommendation. No buy/sell language, no bear cases on individual names. "
+    "Every result also carries `source` — the page on komori.app it came from. When you use a "
+    "finding, cite that link and credit it as \"Komori (komori.app)\" so the reader can check it. "
+    "Call `whoami` first in a new session to see the account's remaining unit budget."
 )
 
 _client = KomoriClient(token_provider=get_token)
 
+# Set by `use_http_tokens` for the hosted server. None = local mode: a 401 clears the stored token
+# and retries once through a fresh browser login.
+_on_unauthorized: Callable[[], Awaitable[None]] | None = None
+
+_tracer = trace.get_tracer("komori_mcp")
+_meter = metrics.get_meter("komori_mcp")
+_tool_calls = _meter.create_counter("komori.mcp.tool_calls", description="MCP tool calls by tool and outcome")
+_tool_duration = _meter.create_histogram("komori.mcp.tool_duration", unit="s", description="MCP tool call duration")
+
+
+def use_http_tokens(token_provider: Callable[[], Awaitable[str]], on_unauthorized: Callable[[], Awaitable[None]]) -> None:
+    """Switch this process to hosted mode. Called once by `http.create_app()`."""
+    global _on_unauthorized
+    _client._token_provider = token_provider
+    _on_unauthorized = on_unauthorized
+
 
 async def _call(fn, *args, **kwargs) -> dict[str, Any]:
-    """Runs one API call, retrying exactly once through a fresh browser-login if the stored
-    token was revoked or expired. Every result is shaped the same way so the model always finds
-    `notice` and unit cost in the same place, and every failure — including one on the retry
-    itself, or the login flow timing out — surfaces a clear, actionable message
-    (docs/TOOL-DESIGN.md §6) rather than an uncaught exception escaping to the MCP transport."""
+    """Runs one API call and shapes the result. Locally, a revoked or expired token is retried
+    exactly once through a fresh browser login; hosted, the caller's connection is the credential,
+    so a 401 means it was revoked mid-request and the client has to reconnect. Every failure —
+    including one on the retry itself, or the login flow timing out — surfaces a clear, actionable
+    message (docs/TOOL-DESIGN.md §6) rather than an uncaught exception escaping to the MCP
+    transport. `args[0]`, when present, is the `/v1` path: it names the result's komori.app page."""
+    path = args[0] if args and isinstance(args[0], str) else None
+    params = kwargs.get("params")
     retried = False
     while True:
         try:
             result = await fn(*args, **kwargs)
-            return _shape(result)
+            return _shape(result, path, params)
         except KomoriApiError as exc:
+            if exc.status_code == 401 and _on_unauthorized is not None:
+                await _on_unauthorized()
+                return _error(401, "Komoriとの接続が切れました。クライアントからKomoriに接続し直してください。", path, params)
             if exc.status_code == 401 and not retried:
                 retried = True
                 clear_stored_token()
                 continue  # one retry, through a fresh login
-            return {"is_error": True, "status_code": exc.status_code, "error": exc.detail}
+            return _error(exc.status_code, exc.detail, path, params)
         except TimeoutError as exc:
-            return {"is_error": True, "error": str(exc)}
+            # The local browser login was not completed in time: the person's step, not an outage.
+            return {"is_error": True, "status_code": 408, "error": str(exc), "source": pages.source(None, path, params)}
+        except Exception:
+            # Anything else is a defect on our side. Answered like every other failure — sourced,
+            # counted as a failure — rather than escaping to the transport as a bare SDK error.
+            logger.exception("tool call failed unexpectedly")
+            return _error(500, "Komoriで予期しないエラーが発生しました。少し待ってからもう一度お試しください。", path, params)
 
 
-def _shape(result: KomoriResult) -> dict[str, Any]:
+def _error(status_code: int, detail: str, path: str | None, params: dict | None) -> dict[str, Any]:
+    return {"is_error": True, "status_code": status_code, "error": detail, "source": pages.source(None, path, params)}
+
+
+def _shape(result: KomoriResult, path: str | None = None, params: dict | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"data": result.data}
     if result.notice:
         out["notice"] = result.notice
     if result.units_charged is not None:
         out["_units"] = {"charged": result.units_charged, "remaining": result.units_remaining}
+    out["source"] = pages.source(result.data, path, params)
     return out
+
+
+def _outcome(result: Any) -> str:
+    """`ok`; `error` — the caller's request was refused (a 4xx: unknown ticker, bad filter, budget
+    spent, a parameter combination rejected here); `failure` — Komori could not serve it (5xx,
+    unreachable = status 0). Only failures page anyone (grafana/alerts/mcp-health.json in senki): a
+    caller's mistake is not an outage. Every error result carries a status; one without is counted
+    as the caller's, never as an outage."""
+    if not (isinstance(result, dict) and result.get("is_error")):
+        return "ok"
+    status = result.get("status_code")
+    return "failure" if status is not None and (status == 0 or status >= 500) else "error"
+
+
+def _instrumented(fn):
+    """A span and two metrics per tool call, and the MCP error flag on a failed one. `opentelemetry-api`
+    only: with no SDK installed (a local stdio install) the telemetry here is a no-op; the hosted
+    image installs the SDK first. Never the token, never a user id on a metric label.
+
+    A failed call is returned as `CallToolResult(isError=True)` carrying the same JSON as a success
+    — `source` included — so a client sees the failure as a failure (not as data) and still gets the
+    komori.app page to send its reader to."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        started = time.monotonic()
+        with _tracer.start_as_current_span("mcp.tool") as span:
+            span.set_attribute("mcp.tool.name", fn.__name__)
+            try:
+                result = await fn(*args, **kwargs)
+            except Exception:
+                # A tool body that raised outside `_call` (argument handling, a defect). Counted as
+                # the failure it is before the SDK reports it.
+                _tool_calls.add(1, {"tool": fn.__name__, "outcome": "failure"})
+                _tool_duration.record(time.monotonic() - started, {"tool": fn.__name__})
+                raise
+            outcome = _outcome(result)
+            span.set_attribute("mcp.tool.outcome", outcome)
+            if isinstance(result, dict):
+                if result.get("status_code") is not None:
+                    span.set_attribute("http.status_code", result["status_code"])
+                if result.get("_units"):
+                    span.set_attribute("komori.units_charged", result["_units"].get("charged") or 0)
+            _tool_calls.add(1, {"tool": fn.__name__, "outcome": outcome})
+            _tool_duration.record(time.monotonic() - started, {"tool": fn.__name__})
+            if outcome == "ok":
+                return result
+            return CallToolResult(
+                content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))],
+                structuredContent=result,
+                isError=True,
+            )
+
+    return wrapper
 
 
 # --- Identity / discovery -----------------------------------------------------------------------
 
 
-@mcp.tool()
 async def whoami() -> dict:
     """Your account, tier, and remaining unit budget. Call this first in a new session — it's
     free and tells you how much room you have before spending units on threads, filing analyses,
@@ -76,7 +180,6 @@ async def whoami() -> dict:
     return await _call(_client.get, "/me")
 
 
-@mcp.tool()
 async def search(q: str, limit: int = 20) -> dict:
     """Lexical search across company names, threads (titles only), filings, signals, and news.
     Free. Good for finding an identifier (a ticker, a thread id, a filing slug) to drill into —
@@ -85,7 +188,6 @@ async def search(q: str, limit: int = 20) -> dict:
     return await _call(_client.get, "/search", params={"q": q, "limit": limit})
 
 
-@mcp.tool()
 async def search_filing_sections(
     q: str,
     tickers: str,
@@ -128,7 +230,6 @@ async def search_filing_sections(
     return await _call(_client.get, "/sections/search", params=params)
 
 
-@mcp.tool()
 async def get_trending(kind: str | None = None) -> dict:
     """What's moving right now across companies, filings, threads, signals, and news. Free. Good
     cold-start entry point when you don't have a specific company in mind yet. Optionally narrow
@@ -138,7 +239,6 @@ async def get_trending(kind: str | None = None) -> dict:
     return await _call(_client.get, "/trending")
 
 
-@mcp.tool()
 async def get_changes(since: str | None = None, limit: int = 50) -> dict:
     """What has changed since a cursor — new filings, disclosures, threads, news, signal moves.
     Free. Pass back the `next_cursor` from a prior call to page forward; omitting `since` resumes
@@ -153,7 +253,6 @@ async def get_changes(since: str | None = None, limit: int = 50) -> dict:
 # --- Companies ------------------------------------------------------------------------------------
 
 
-@mcp.tool()
 async def list_companies(limit: int = 50, page: int = 1, sector: str | None = None) -> dict:
     """The company universe as identifiers — ticker, names, sector. Free, cheap. Use `search`
     instead if you're looking for a specific company by name."""
@@ -163,7 +262,6 @@ async def list_companies(limit: int = 50, page: int = 1, sector: str | None = No
     return await _call(_client.get, "/companies", params=params)
 
 
-@mcp.tool()
 async def get_company(ticker: str) -> dict:
     """One company's identity (name, sector). Free. `ticker` is always the 4-character TSE code
     (e.g. `7203`), never a 5-character code."""
@@ -173,7 +271,6 @@ async def get_company(ticker: str) -> dict:
 # --- Filings --------------------------------------------------------------------------------------
 
 
-@mcp.tool()
 async def list_filings(limit: int = 30, before: str | None = None, since: str | None = None, ticker: str | None = None) -> dict:
     """The filing/disclosure feed, optionally scoped to one company and/or a date window. Free.
     Each row carries a `slug` (EDINET filings) or a `disclosure_no` (TDnet disclosures) — that's
@@ -185,14 +282,12 @@ async def list_filings(limit: int = 30, before: str | None = None, since: str | 
     return await _call(_client.get, "/filings", params=params)
 
 
-@mcp.tool()
 async def get_filing(ticker: str, slug: str) -> dict:
     """Metadata for one filing (title, doc type, filed date). Free. For the actual analysis
     (rubric scores, own-words, what changed), use `get_filing_analysis` — that one costs a unit."""
     return await _call(_client.get, f"/companies/{ticker}/filings/{slug}")
 
 
-@mcp.tool()
 async def get_filing_analysis(ticker: str, slug: str) -> dict:
     """What Komori concluded about one filing: a rubric score across several dimensions (change
     intensity, strategic shift, capital action, etc.), the company's own words on key topics, and
@@ -201,7 +296,6 @@ async def get_filing_analysis(ticker: str, slug: str) -> dict:
     return await _call(_client.get, f"/companies/{ticker}/filings/{slug}/analysis")
 
 
-@mcp.tool()
 async def get_filing_scenario(ticker: str, slug: str) -> dict:
     """The cause-and-effect scenario tree read off one filing: a thesis, the mechanism behind it,
     the filing text it rests on, and named consequences with which other companies are exposed
@@ -212,7 +306,6 @@ async def get_filing_scenario(ticker: str, slug: str) -> dict:
 # --- 変遷 threads -----------------------------------------------------------------------------
 
 
-@mcp.tool()
 async def get_company_threads(
     ticker: str,
     ids: str | None = None,
@@ -253,9 +346,11 @@ async def get_company_threads(
             # The same error shape `_call` returns, so the model sees one contract.
             return {
                 "is_error": True,
+                "status_code": 400,
                 "error": "themes=True のときはスレッドの絞り込み（ids / move / kind / "
                 "latest_move / since）は指定できません。テーマを取得する場合は ticker だけを"
                 "指定してください。",
+                "source": pages.source(None, f"/companies/{ticker}/themes"),
             }
         return await _call(_client.get, f"/companies/{ticker}/themes")
     params: dict[str, Any] = {}
@@ -265,7 +360,6 @@ async def get_company_threads(
     return await _call(_client.get, f"/companies/{ticker}/threads", params=params)
 
 
-@mcp.tool()
 async def get_thread(ticker: str, thread_id: str) -> dict:
     """One thread's full quote history — every event, dated, with the company's verbatim words
     and a plain-language note on what changed. Costs 1 unit under the usual free-forever rule."""
@@ -275,7 +369,6 @@ async def get_thread(ticker: str, thread_id: str) -> dict:
 # --- Cross-company themes (#634) ---------------------------------------------------------------
 
 
-@mcp.tool()
 async def list_themes(
     min_reach: int = 10,
     episodic: bool | None = None,
@@ -306,7 +399,6 @@ async def list_themes(
     return await _call(_client.get, "/themes", params=params)
 
 
-@mcp.tool()
 async def get_theme(
     theme_id: str,
     limit: int = 50,
@@ -336,7 +428,6 @@ async def get_theme(
 # --- News / signals ---------------------------------------------------------------------------
 
 
-@mcp.tool()
 async def list_news(limit: int = 30, ticker: str | None = None) -> dict:
     """The news feed, optionally scoped to one company. Free."""
     params: dict[str, Any] = {"limit": limit}
@@ -345,19 +436,16 @@ async def list_news(limit: int = 30, ticker: str | None = None) -> dict:
     return await _call(_client.get, "/news", params=params)
 
 
-@mcp.tool()
 async def get_news_story(story_id: str) -> dict:
     """One full news story. Costs 1 unit under the usual free-forever rule."""
     return await _call(_client.get, f"/news/{story_id}")
 
 
-@mcp.tool()
 async def list_signals() -> dict:
     """The signal catalog — every Komori signal's key, name, and category. Free."""
     return await _call(_client.get, "/signals")
 
 
-@mcp.tool()
 async def get_signal(key: str) -> dict:
     """One signal's description and stats (IC, sharpe, hit rate). Costs 1 unit. This is catalog
     detail, not the per-company audit trail — it doesn't say what a specific company scores."""
@@ -367,7 +455,6 @@ async def get_signal(key: str) -> dict:
 # --- Market -----------------------------------------------------------------------------------
 
 
-@mcp.tool()
 async def get_market_summary() -> dict:
     """Current market state — indices, sector performance. Free."""
     return await _call(_client.get, "/market/summary")
@@ -376,7 +463,6 @@ async def get_market_summary() -> dict:
 # --- Watchlists (the only writes) -------------------------------------------------------------
 
 
-@mcp.tool()
 async def list_watchlists() -> dict:
     """Your saved watchlists. Free. Every company on any of your watchlists is exempt from
     metering everywhere else in this API — adding a company here is how you make its threads,
@@ -384,7 +470,6 @@ async def list_watchlists() -> dict:
     return await _call(_client.get, "/watchlists")
 
 
-@mcp.tool()
 async def create_watchlist(name: str, tickers: str | None = None) -> dict:
     """Create a watchlist, optionally pre-populated with companies (comma-separated tickers —
     resolve names to tickers with `search` first if you only have names). Free. Creating a
@@ -396,7 +481,6 @@ async def create_watchlist(name: str, tickers: str | None = None) -> dict:
     return await _call(_client.post, "/watchlists", body)
 
 
-@mcp.tool()
 async def add_to_watchlist(watchlist_id: str, ticker: str) -> dict:
     """Add one company to a watchlist. Free, idempotent — adding a company already on the list is
     a no-op, not an error."""
@@ -411,13 +495,10 @@ async def add_to_watchlist(watchlist_id: str, ticker: str) -> dict:
 # into the list's rule server-side — nothing is validated or merged here.
 
 
-
-
 def _switch(watchlist_id: str, kind: str, body: dict[str, Any]):
     return _call(_client.put, f"/watchlists/{watchlist_id}/notifications/{kind}", body)
 
 
-@mcp.tool()
 async def get_watchlist_notifications(watchlist_id: str) -> dict:
     """What notifications are switched on for one of your watchlists: documents and news (list-wide
     and/or per company), the daily performance and risk thresholds, and `delivery` — whether they
@@ -426,7 +507,6 @@ async def get_watchlist_notifications(watchlist_id: str) -> dict:
     return await _call(_client.get, f"/watchlists/{watchlist_id}/notifications")
 
 
-@mcp.tool()
 async def set_watchlist_document_notifications(watchlist_id: str, enabled: bool, ticker: str | None = None) -> dict:
     """Switch notifications for NEW DOCUMENTS — statutory filings (有価証券報告書, 四半期/半期報告書)
     and timely disclosures (適時開示 such as 決算短信) — on or off for one of your watchlists. Free.
@@ -447,7 +527,6 @@ async def set_watchlist_document_notifications(watchlist_id: str, enabled: bool,
     return await _switch(watchlist_id, "documents", body)
 
 
-@mcp.tool()
 async def set_watchlist_news_notifications(watchlist_id: str, enabled: bool, ticker: str | None = None) -> dict:
     """Switch NEWS notifications (news stories naming a company on the list) on or off for one of
     your watchlists. Free. Emailed in a batch at most every six hours.
@@ -467,7 +546,6 @@ async def set_watchlist_news_notifications(watchlist_id: str, enabled: bool, tic
     return await _switch(watchlist_id, "news", body)
 
 
-@mcp.tool()
 async def set_watchlist_performance_notification(
     watchlist_id: str, enabled: bool, percent: float | None = None, direction: str | None = None
 ) -> dict:
@@ -491,7 +569,6 @@ async def set_watchlist_performance_notification(
     return await _switch(watchlist_id, "performance", _threshold_body(enabled, percent, direction))
 
 
-@mcp.tool()
 async def set_watchlist_risk_notification(
     watchlist_id: str, enabled: bool, percent: float | None = None, direction: str | None = None
 ) -> dict:
@@ -521,7 +598,6 @@ def _threshold_body(enabled: bool, percent: float | None, direction: str | None)
     return body
 
 
-@mcp.tool()
 async def set_notification_delivery(enabled: bool) -> dict:
     """The ACCOUNT-WIDE notifications switch: off means no notification from any list reaches you
     (neither the komori.app inbox nor email), whatever the list settings say. Free. Call it ONLY when
@@ -529,3 +605,58 @@ async def set_notification_delivery(enabled: bool) -> dict:
     is off — never as a side effect of switching a list's notification on. Returns the new
     `delivery` status."""
     return await _call(_client.patch, "/notifications/settings", {"enabled": enabled})
+
+
+# --- Registration -----------------------------------------------------------------------------------
+
+_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+
+# (function, human title, annotations). Order is the order `tools/list` returns.
+READ_TOOLS: list[tuple[Callable, str]] = [
+    (whoami, "Account and unit budget"),
+    (search, "Search Komori"),
+    (search_filing_sections, "Search filing text"),
+    (get_trending, "What is moving now"),
+    (get_changes, "Changes since a cursor"),
+    (list_companies, "List companies"),
+    (get_company, "Company identity"),
+    (list_filings, "Filings and disclosures feed"),
+    (get_filing, "Filing metadata"),
+    (get_filing_analysis, "Filing analysis"),
+    (get_filing_scenario, "Filing scenario tree"),
+    (get_company_threads, "Company 変遷 threads or themes"),
+    (get_thread, "One 変遷 thread"),
+    (list_themes, "Cross-company themes"),
+    (get_theme, "One theme"),
+    (list_news, "News feed"),
+    (get_news_story, "One news story"),
+    (list_signals, "Signal catalog"),
+    (get_signal, "One signal"),
+    (get_market_summary, "Market summary"),
+    (list_watchlists, "Your watchlists"),
+    (get_watchlist_notifications, "Watchlist notification settings"),
+]
+
+WRITE_TOOLS: list[tuple[Callable, str, ToolAnnotations]] = [
+    (create_watchlist, "Create a watchlist", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)),
+    (add_to_watchlist, "Add a company to a watchlist", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)),
+    (set_watchlist_document_notifications, "Document notifications on/off", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)),
+    (set_watchlist_news_notifications, "News notifications on/off", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)),
+    (set_watchlist_performance_notification, "Performance threshold", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)),
+    (set_watchlist_risk_notification, "Risk threshold", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)),
+    (set_notification_delivery, "Account-wide notification switch", ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)),
+]
+
+
+def build_server(include_writes: bool, **settings: Any) -> FastMCP:
+    """A FastMCP server carrying the read tools, plus the write tools when `include_writes`."""
+    server = FastMCP("komori", instructions=INSTRUCTIONS, **settings)
+    for fn, title in READ_TOOLS:
+        server.add_tool(_instrumented(fn), name=fn.__name__, title=title, annotations=_READ)
+    if include_writes:
+        for fn, title, annotations in WRITE_TOOLS:
+            server.add_tool(_instrumented(fn), name=fn.__name__, title=title, annotations=annotations)
+    return server
+
+
+mcp = build_server(include_writes=True)

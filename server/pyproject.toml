@@ -1,13 +1,15 @@
 [project]
 name = "komori-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Komori MCP server — Japan-equities disclosure research over the Model Context Protocol"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
-    "mcp>=1.26.0,<2",
+    "mcp>=1.30.0,<2",
     "httpx>=0.27",
     "keyring>=25.0",
+    "opentelemetry-api>=1.27",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

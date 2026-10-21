@@ -9,6 +9,7 @@ themes").
 """
 
 import komori_mcp.server as server
+from komori_mcp import pages
 from komori_mcp.client import KomoriApiError, KomoriResult
 
 
@@ -42,7 +43,12 @@ async def test_a_second_401_returns_a_clean_error_instead_of_raising(monkeypatch
 
     result = await server._call(always_401)
 
-    assert result == {"is_error": True, "status_code": 401, "error": "Invalid token"}
+    assert {k: result[k] for k in ("is_error", "status_code", "error")} == {
+        "is_error": True,
+        "status_code": 401,
+        "error": "Invalid token",
+    }
+    assert result["source"]["name"] == "Komori (komori.app)"
     assert calls["n"] == 2, "must retry exactly once through a fresh login before giving up"
 
 
@@ -52,7 +58,7 @@ async def test_a_login_timeout_returns_a_clean_error_instead_of_raising():
 
     result = await server._call(raises_timeout)
 
-    assert result == {"is_error": True, "error": "Login did not complete within 180s."}
+    assert result["is_error"] is True and result["error"] == "Login did not complete within 180s."
 
 
 # --- #634: cross-company themes ----------------------------------------------------------------
@@ -155,3 +161,51 @@ async def test_notification_tool_descriptions_spell_out_units_and_delivery():
         "set_watchlist_risk_notification",
     ):
         assert tools[name].description, name
+
+
+# --- senki#1074: link-back + the hosted tool set -------------------------------------------------
+
+
+def _result(data):
+    return KomoriResult(data=data, notice=None, units_charged=None, units_remaining=None)
+
+
+def test_every_result_names_its_komori_page_and_credits_komori():
+    shaped = server._shape(_result({"ticker": "7203", "url": "https://komori.app/company/7203"}), "/companies/7203")
+    assert shaped["source"] == {
+        "name": "Komori (komori.app)",
+        "url": "https://komori.app/company/7203?utm_source=komori-mcp&utm_medium=mcp",
+    }
+
+
+def test_a_news_story_cites_its_komori_page_never_the_publisher():
+    story = {"id": "abc", "url": "https://www.nikkei.com/article/X", "komori_url": "https://komori.app/news/abc"}
+    assert server._shape(_result(story), "/news/abc")["source"]["url"].startswith("https://komori.app/news/abc?")
+    # No komori_url: the publisher url is still ignored, and the path names the page.
+    del story["komori_url"]
+    assert server._shape(_result(story), "/news/abc")["source"]["url"].startswith("https://komori.app/news/abc?")
+
+
+def test_paths_map_to_their_pages():
+    cases = {
+        ("/companies/7203/filings/2025-fy/analysis", None): "/company/7203/filing/2025-fy",
+        ("/companies/7203/threads/t1", None): "/company/7203/threads/t1",
+        ("/companies/7203/themes", None): "/company/7203",
+        ("/themes/g1", None): "/themes/g1",
+        ("/signals/momentum_12m", None): "/signals/momentum_12m",
+        ("/filings", None): "/filings",
+        ("/news", (("ticker", "8306"),)): "/company/8306",
+        ("/sections/search", (("tickers", "6501,7203"),)): "/company/6501",
+        ("/watchlists/w1/notifications", None): "/watchlist",
+        ("/market/summary", None): "/",
+    }
+    for (path, params), page in cases.items():
+        assert pages.page_for(path, dict(params or ())) == f"https://komori.app{page}", path
+    assert pages.page_for("/search", {"q": "半導体"}) == "https://komori.app/search?q=%E5%8D%8A%E5%B0%8E%E4%BD%93"
+
+
+async def test_local_server_keeps_every_tool_and_hosted_drops_the_writes():
+    local = {t.name for t in await server.mcp.list_tools()}
+    hosted = {t.name for t in await server.build_server(include_writes=False).list_tools()}
+    assert len(local) == 29 and len(hosted) == 22
+    assert local - hosted == {fn.__name__ for fn, _, _ in server.WRITE_TOOLS}
