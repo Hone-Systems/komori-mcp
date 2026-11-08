@@ -1,0 +1,22 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "notGrouped": "bottom",
+  "groupings": [
+    {
+      "title": "Start here",
+      "description": "Connect to Komori and pick the right tool for a Japan-equities question.",
+      "skills": [
+        "komori"
+      ]
+    },
+    {
+      "title": "Research workflows",
+      "description": "End-to-end recipes over Japanese filings and 変遷 threads.",
+      "skills": [
+        "claim-audit",
+        "language-drift",
+        "pre-position-checklist"
+      ]
+    }
+  ]
+}
