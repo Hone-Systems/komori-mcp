@@ -1,5 +1,7 @@
 # komori-mcp
 
+[![skills.sh](https://skills.sh/b/hone-systems/komori-mcp)](https://skills.sh/hone-systems/komori-mcp)
+
 Japan-equities disclosure research over the Model Context Protocol — filings, 変遷 (narrative
 threads tracked across a company's filing history), scenario trees, and semantic search over what
 a company actually wrote, not just its headlines. Built on the [Komori external API](https://api.komori.app/v1)
@@ -112,8 +114,17 @@ research usage rarely touches the budget.
 
 ## Skills
 
-Three bundled skills encode how to actually use these tools for real research, not just what each
-one returns:
+Four bundled skills encode how to actually use these tools for real research, not just what each
+one returns. The Claude Code and Codex plugins ship them automatically. For any other agent
+(Cursor, Windsurf, OpenCode, Gemini CLI, and the rest), install them with the
+[skills CLI](https://skills.sh/hone-systems/komori-mcp):
+
+```
+npx skills add Hone-Systems/komori-mcp
+```
+
+- **`komori`**: how to connect (MCP or REST), what costs a unit, and which tool answers which
+  question. Start here.
 
 - **`pre-position-checklist`** — before looking at a name, what to verify from its thread history.
 - **`claim-audit`** — check an outside thesis or note against the actual filing text, sorted into

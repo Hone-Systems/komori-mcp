@@ -5,6 +5,12 @@ description: Use when the user brings in an outside claim about a Japanese-liste
 
 # Claim audit
 
+**Requires the Komori MCP server** (tools `search`, `get_company_threads`, …). If those tools
+aren't available, follow the setup steps in the `komori` skill
+(`npx skills add Hone-Systems/komori-mcp --skill komori`) or see
+https://github.com/Hone-Systems/komori-mcp#install. Every result carries `source`, a komori.app
+link. Cite it, and credit "Komori (komori.app)".
+
 Sort every claim into exactly one of three buckets. Never say who's right — only what the filings
 do and don't say.
 

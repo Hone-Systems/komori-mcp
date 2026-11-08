@@ -5,6 +5,12 @@ description: Use to track how a Japanese-listed company's wording on one specifi
 
 # Language drift
 
+**Requires the Komori MCP server** (tools `search`, `get_company_threads`, …). If those tools
+aren't available, follow the setup steps in the `komori` skill
+(`npx skills add Hone-Systems/komori-mcp --skill komori`) or see
+https://github.com/Hone-Systems/komori-mcp#install. Every result carries `source`, a komori.app
+link. Cite it, and credit "Komori (komori.app)".
+
 Single-company, single-thread, forensic — no cross-referencing against other companies needed. The
 whole analysis rides on one structural fact: every thread event already carries an explicit `move`
 classification (INTRODUCED, RAISED, SOFTENED, DETERIORATED, REAFFIRMED, ACHIEVED, and others), so
